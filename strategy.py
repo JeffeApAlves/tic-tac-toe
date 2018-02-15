@@ -2,9 +2,10 @@ import random
 import numpy as np
 import copy
 from math import inf as infinity
+from scipy.special import factorial
 
-from register import *
-from game import *
+from game import Game
+from register import RegisterStrategy
 
 class StrategyGame(object):
 
@@ -15,18 +16,22 @@ class StrategyGame(object):
 
     game        = None
 
-    def __init__(self,game,player):
+    def __init__(self,game,player,verbose=False):
         StrategyGame.game = game
-        self._player = player
-        self._name = ""
+        self._player    = player
+        self._name      = ""
         self._current_sequence = []
-        self._sequence = []
+        self._sequence  = []
+        # Registra o número de interações feitas
+        self._count     = 0
+        self._register  = RegisterStrategy(game.size,"strategyP{}.txt".format(self._player.id),verbose)
 
-    def start(self):
-        self._current_sequence = copy.deepcopy(self._sequence)
-
-    def move(self):
-        raise NotImplementedError()
+    @property
+    def count(self):
+        """
+        Contador de testes da estrategia
+        """
+        return self._count
 
     @property
     def current_sequence(self):
@@ -34,6 +39,9 @@ class StrategyGame(object):
 
     @property
     def sequence(self):
+        """
+        Seuencia de jogadas recebida via a opção --sequence na CL
+        """
         return self._sequence
 
     @sequence.setter
@@ -42,32 +50,79 @@ class StrategyGame(object):
 
     @property
     def name(self):
+        """
+        Nome da estrategia
+        """
         return self._name
+
+    def start(self):
+        self._current_sequence = copy.deepcopy(self._sequence)
+
+    def move(self):
+        raise NotImplementedError()
 
     @staticmethod
     def options():
         return [StrategyGame.RANDOM,StrategyGame.MINIMAX,StrategyGame.ALPHA_BETA,StrategyGame.HUMAN]
 
+    def _calc_score(self,board,player):
+        """
+        Faz a avaliação theuristica do estado que está o tabuleiro.
+        :Retorna +10 se o player  ganhar ; -1 0 se o adversário ganhar ; e 0  nas demais situações
+        """
+
+        winner = StrategyGame.game.evaluate(board)
+
+        if winner == player.id:
+            score = +10
+        elif winner == StrategyGame.game.opponent(player).id:
+            # Oponente ganhou
+            score = -10
+        else:
+            score = 0
+
+        return score
+
+    def possibilities_games(self):
+        """
+        Calcula o fatorial da quantidade de celualas vazias para verificar o número de possíveis status do tabuleiro
+        """
+
+        #all_empty   = self.empty_cells()
+        #return list(itertools.permutations(all_empty,len(all_empty)))
+
+        # With exact=False the factorial is approximated using the gamma function:
+        return factorial(len(StrategyGame.game.empty_cells()),exact = True)
+
+
+    def deinit(self):
+        """
+        Finaliza a estrategia
+        """
+
+        self._register.close()
+
+
 class StrategyHuman(StrategyGame):
 
-    def __init__(self,game,player):
-        super().__init__(game, player)
+    def __init__(self,game,player,verbose=False):
+        super().__init__(game, player,verbose)
         self._name = StrategyGame.HUMAN
 
     def move(self):
 
-        print(board_out(StrategyGame.game.board,StrategyGame.game.players))
+        print(self._player.board_out(StrategyGame.game.board,StrategyGame.game.players))
         
         pos = input("Enter the row,col \n")
         pos = tuple(int(x.strip()) for x in pos.split(','))
 
-        return pos,0
+        return (pos,0)
 
 class StrategyRandom(StrategyGame):
 
 
-    def __init__(self,game,player):
-        super().__init__(game, player)
+    def __init__(self,game,player,verbose=False):
+        super().__init__(game, player,verbose)
         self._name = StrategyGame.RANDOM
 
     def move(self):
@@ -78,88 +133,81 @@ class StrategyRandom(StrategyGame):
         empty_cells = StrategyGame.game.empty_cells()
         pos = random.choice(empty_cells)
         
-        return pos,0
+        return (pos,0)
 
 class StrategyMinimax(StrategyGame):
 
-    # Registra o número de interações feitas
-    count_minimax = 0
 
-    def __init__(self,game,player):
-        super().__init__(game, player)
+    def __init__(self,game,player,verbose=False):
+        super().__init__(game, player,verbose)
         self._name = StrategyGame.MINIMAX
+
 
     def move(self):
         """
         Estrategia minimax
         """
 
+        self._count = 0
+
+        self._register.header_tree(self.game.size)
+
         deph = len(StrategyGame.game.empty_cells())
 
-        StrategyMinimax.count_minimax = 0
+        strategy_result   =  self.__minimax(StrategyGame.game.board,deph,self._player)
 
-        register_begin_minimax(StrategyGame.game,self._player)
+        return strategy_result
 
-        register_header_tree(deph)
 
-        pos,score   =  StrategyMinimax.minimax(StrategyGame.game.board,deph,self._player)
-
-        register_end_strategy(StrategyGame.game,self._player,pos,score)
-
-        return pos,score
-
-    @staticmethod
-    def minimax(origin,deph,player,maximizingPlayer=True):
+    def __minimax(self,origin,deph,player,maximizingPlayer=True):
         """
         Algoritmo minimax: https://en.wikipedia.org/wiki/Minimax 
         Retorna o melhor score com a posição
         """
 
-        StrategyMinimax.count_minimax+=1
+        self._count += 1
 
-        board = np.copy(origin)
+        board   = np.copy(origin)
 
-        winner = Game.evaluate(board,StrategyGame.game.players)
+        winner  = StrategyGame.game.evaluate(board)
         
         if deph<=0 or winner !=0:
-            score = calc_score(board,player)
-            register_result(board,player,deph,winner,score)
-            return None,score
+            score = self._calc_score(board,player)
+            self._register.result(StrategyGame.game,self,board,player,deph,winner,score)
+            return (None,score)
 
         # Incializa bestValue com o valor do limite oposto
         best =  -infinity if maximizingPlayer else  infinity
-        move = None,best
+        move = (None,best)
 
         for pos in Game.possibilities_cells(board):
 
-            place(board, player, pos)
+            Game.place(board, player, pos)
 
-            register_loop_minimax(board, player,deph,pos)
-            register_node(board,player,deph,pos)
+            StrategyGame.game.register.loop_strategy(StrategyGame.game,self,board, player,deph,pos)
+            self._register.node(StrategyGame.game,self,board,player,deph,pos)
 
-            p,score = StrategyMinimax.minimax(board,deph-1,StrategyGame.game.opponent(player),not maximizingPlayer)
+            (p,score) = self.__minimax(board,deph-1,StrategyGame.game.opponent(player),not maximizingPlayer)
 
             if maximizingPlayer:
                 # max
                 if score > best:
                     best = score
-                    move = pos,best
+                    move = (pos,best)
             else:
                 # min
                 if score < best:
                     best = score
-                    move = pos,best
+                    move = (pos,best)
 
-        return move
+        return  move
 
-class StrategyAlphaBeta(StrategyGame):
+class StrategyAlphaBeta(StrategyMinimax):
 
-    # Registra o número de interações feitas
-    count_minimax = 0
 
-    def __init__(self,game,player):
-        super().__init__(game, player)
-        self._name = StrategyGame.MINIMAX
+    def __init__(self,game,player,verbose=False):
+        super().__init__(game, player,verbose)
+        self._name = StrategyGame.ALPHA_BETA
 
 
     def move(self):
@@ -167,185 +215,76 @@ class StrategyAlphaBeta(StrategyGame):
         Estrategia alpha beta
         """
 
+        self._count = 0
+
+        self._register.header_tree(self.game.size)
+
         deph = len(StrategyGame.game.empty_cells())
 
-        StrategyMinimax.count_minimax = 0
-
-        register_begin_minimax(StrategyGame.game,self._player)
-
-        register_header_tree(deph)
-
-        pos, score  = StrategyAlphaBeta.alpha_beta(StrategyGame.game.board , deph , self._player)
-
-        register_end_strategy(StrategyGame.game,self._player,pos,score)
-
-        return pos,score
+        strategy_result  = self.__alpha_beta(StrategyGame.game.board , deph , self._player)
 
 
-    @staticmethod
-    def alpha_beta(origin,deph , player , alpha = -infinity,beta = infinity , maximizingPlayer = True):
+        return strategy_result
+
+
+    def __alpha_beta(self,origin,deph , player , alpha = -infinity,beta = infinity , maximizingPlayer = True):
         """
         Algoritmo alpha beta pruning: https://en.wikipedia.org/wiki/Alpha%E2%80%93beta_pruning 
         Retorna o melhor score com a posição
         """
 
-        StrategyMinimax.count_minimax+=1
+        self._count += 1
 
         board = np.copy(origin)
 
-        winner = Game.evaluate(board,StrategyGame.game.players)
+        winner = StrategyGame.game.evaluate(board)
         
         if deph<=0 or winner !=0:
-            score = calc_score(board,player)
-            register_result(board,player,deph,winner,score)
-            return None,score
+            score = self._calc_score(board,player)
+            self._register.result(StrategyGame.game,self,board,player,deph,winner,score)
+            return (None,score)
 
         # Incializa bestValue com o valor do limite oposto
-        move = None,-infinity if maximizingPlayer else  infinity
+        move = (None,-infinity if maximizingPlayer else  infinity)
 
-        if maximizingPlayer:
-            for pos in Game.possibilities_cells(board):
+        for pos in Game.possibilities_cells(board):
 
-                place(board, player, pos)
-                register_loop_minimax(board, player,deph,pos)
-                register_node(board,player,deph,pos)
+            Game.place(board, player, pos)
 
-                p,score = StrategyAlphaBeta.alpha_beta(board,deph-1,StrategyGame.game.opponent(player),alpha,beta, not maximizingPlayer)
+            StrategyGame.game.register.loop_strategy(StrategyGame.game,self,board, player,deph,pos)
+            
+            self._register.node(StrategyGame.game,self,board,player,deph,pos)
+
+            (p,score)= self.__alpha_beta(board,deph-1,StrategyGame.game.opponent(player),alpha,beta, not maximizingPlayer)
+
+            if maximizingPlayer:
 
                 if score  > alpha :
                     alpha = score
-                    move = pos,alpha
-    
-                if beta <= alpha:
-                    break
-        else:
-            for pos in Game.possibilities_cells(board):
-
-                place(board, player, pos)
-                register_loop_minimax(board, player,deph,pos)
-                register_node(board,player,deph,pos)
-
-                p,score = StrategyAlphaBeta.alpha_beta(board,deph-1,StrategyGame.game.opponent(player),alpha,beta, not maximizingPlayer)
+                    move = (pos,alpha)
+            else:
 
                 if score < beta:
                     beta = score
-                    move = pos,beta
+                    move = (pos,beta)
 
-                if beta <= alpha:
-                    break
+            if beta <= alpha:
+                break
 
         return move
 
-def calc_score(board,player):
+def create_strategy(strategy,game,player,verbose):
     """
-    Function to heuristic evaluation of state.
-    :param state: the state of the current board
-    :Retorn +1 se o player  ganhar ; -1 se o player não ganhar ; 0  nas demais situações
+    Cria a estrategia que será adotada no jogo para o player
     """
 
-    winner = Game.evaluate(board,StrategyGame.game.players)
+    if strategy == StrategyGame.RANDOM:
+        strategy = StrategyRandom(game,player,verbose)
+    elif strategy == StrategyGame.MINIMAX:
+        strategy = StrategyMinimax(game,player,verbose)
+    elif strategy == StrategyGame.ALPHA_BETA:
+        strategy = StrategyAlphaBeta(game,player,verbose)
+    elif strategy == StrategyGame.HUMAN:
+        strategy = StrategyHuman(game,player)
 
-    if winner == player.id:
-        score = +10
-    elif winner == StrategyGame.game.opponent(player).id:
-        # Oponente ganhou
-        score = -10
-    else:
-        score = 0
-
-    return score
-
-def register_begin_minimax(game,player):
-    """
-    Registra o inicio da estrategia minimax
-    """
-
-    resumo = "\n".join((
-
-"Player: %d - Start strategy"       % (player.id) ,
-"Strategy: Minimax",
-"Empty cells: %s"                   % (str(game.empty_cells())) ,
-"Games possibilities: %d"           % (len(game.possibilities_games()))
-    
-    )) + "\n"
-
-    register_board(game.board,game.players,resumo,1)
-
-
-def register_end_strategy(game,player,pos,score):
-
-
-    resumo = "\n".join((
-
-"Player: %d  - End Strategy" % (player.id),
-"Number of loops: %-10d"     % (StrategyMinimax.count_minimax),
-"Position: %s Score: %f"     % (str(pos),score)
-    
-    )) + "\n"
-    
-    register_board(game.board,game.players,resumo,1 )
-
-
-def register_result(board,player,deph,winner,score):
-
-    tab1    = "┆                   " * (9-deph)
-    tab2    = "┆                   " * (deph)
-
-    lines = "\n".join((
-
-"{}┆┄{:<1}) Count: {:<8}{}"    .format(tab1,deph,StrategyMinimax.count_minimax,tab2),
-"{}┆ P{:<1} Win:{:<2} {:<8}{}" .format(tab1,player.id,winner,score,tab2),
-board_out_simple(board,StrategyGame.game.players,deph)
-    
-    )) + "\n"
-
-    tree_file.write(lines)
-
-
-def register_header_tree(deph):
-
-    max_deph = 10
-
-    lines = "\n".join((
-
-"".join(["%d                   " % (9-i) for i in range(max_deph)]),
-"┆                   " * max_deph
-    
-    )) + "\n"
-
-    tree_file.write(lines)
-
-
-def register_loop_minimax(board,player,deph,pos):
-    """
-    Registra um node do minimax 
-    """
-
-    seq = Game.possibilities_cells(board)
-
-
-    resumo = "\n".join((
-
-"Player: %d - Minimax loop(%d)" % (player.id,StrategyMinimax.count_minimax),
-"Options(%d): %s"               % (len(seq),str(seq)),
-"Deph: %d Position: %s"         % (deph,str(pos))
-
-    )) + "\n"
-
-    register_board(board, StrategyGame.game.players,resumo,2)
-
-
-def register_node(board,player,deph,pos):
-
-    tab1    = "┆                   " * (9-deph)
-    tab2    = "┆                   " * (deph)
-
-    lines = "\n".join((
-
-"{}┆┄{:<1}) Count: {:<8}{}"   .format(tab1,deph,StrategyMinimax.count_minimax,tab2),
-"{}┆ P{:<1} {:<15}{}"         .format(tab1,player.id,str(pos),tab2),
-board_out_simple(board,StrategyGame.game.players,deph)
-
-    )) + "\n"
-
-    tree_file.write(lines)
+    return strategy
